@@ -436,6 +436,25 @@ def get_conversations():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/messages/<message_id>', methods=['DELETE'])
+@require_auth
+def delete_message(message_id):
+    """Delete a message — only the sender can delete their own message"""
+    try:
+        user_id = request.user.id
+        # Verify the message belongs to the requesting user
+        msg_res = supabase.table('messages').select('sender_id').eq('id', message_id).execute()
+        if not msg_res.data:
+            return jsonify({"error": "Message not found"}), 404
+        if msg_res.data[0]['sender_id'] != user_id:
+            return jsonify({"error": "Forbidden – you can only delete your own messages"}), 403
+        supabase.table('messages').delete().eq('id', message_id).execute()
+        return jsonify({"message": "Message deleted"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
 # --- SHIFTS API ---
 
 @app.route('/api/shifts', methods=['POST'])
