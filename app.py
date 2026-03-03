@@ -52,6 +52,11 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated
 
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Lightweight endpoint for keep-alive pings. Prevents Render cold starts."""
+    return jsonify({"status": "ok"}), 200
+
 # --- GEOCODING & DISTANCE HELPERS ---
 
 def geocode_location(address):
