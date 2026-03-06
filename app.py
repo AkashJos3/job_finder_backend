@@ -88,13 +88,6 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return R * c
 
 # --- GENERAL ---
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    """Simple connection test endpoint"""
-    return jsonify({
-        "status": "online",
-        "message": "Flask backend is running and connected to Supabase!"
-    }), 200
 
 # --- JOBS API ---
 
