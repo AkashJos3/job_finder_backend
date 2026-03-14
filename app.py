@@ -1157,6 +1157,7 @@ def submit_report():
             "reported_id": reported_id,
             "job_id": job_id,
             "reason": reason,
+            "severity": data.get('severity', 'medium'),
             "status": "pending"
         }
         res = supabase.table('reports').insert(report_data).execute()
