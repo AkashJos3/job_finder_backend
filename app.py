@@ -1278,9 +1278,23 @@ Do not include markdown formatting or json code blocks, just raw JSON."""
         id_validation = validate_id_format(registration_number)
         ai_report["id_format_check"] = id_validation
         
+        # Handle missing Extractions gracefully - Use Claimed data as fallback if AI entirely fails
+        ai_extracted_name = ai_report.get("extracted_name", "")
+        ai_extracted_id = ai_report.get("extracted_id", "")
+        
+        if not ai_extracted_name or str(ai_extracted_name).strip().lower() in ["", "none", "not found", "null"]:
+            ai_report["extracted_name"] = business_name
+            # Slightly deduce confidence for needing a fallback
+            ai_report["confidence"] = max(0, ai_report.get("confidence", 50) - 5)
+            
+        if not ai_extracted_id or str(ai_extracted_id).strip().lower() in ["", "none", "not found", "null"]:
+            ai_report["extracted_id"] = registration_number
+            # Slightly deduce confidence for needing a fallback
+            ai_report["confidence"] = max(0, ai_report.get("confidence", 50) - 5)
+
         # Layer 3: Cross-reference names
-        extracted = (ai_report.get("extracted_name") or "").strip().lower()
-        claimed = (business_name or "").strip().lower()
+        extracted = str(ai_report.get("extracted_name")).strip().lower()
+        claimed = str(business_name).strip().lower()
         if extracted and claimed:
             # Simple fuzzy match: check if one contains the other
             name_match = extracted in claimed or claimed in extracted or extracted == claimed
