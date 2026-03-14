@@ -167,16 +167,27 @@ def parse_job_poster():
         Do not include markdown formatting or json code blocks, just raw JSON.
         """
 
-        response = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=[prompt, img]
-        )
+        # Try multiple models as fallback (free-tier availability varies by region)
+        models_to_try = ['gemini-2.0-flash-lite', 'gemini-2.0-flash', 'gemini-1.5-flash-8b']
+        last_error = None
         
-        # Clean response in case it has markdown markers
-        text = response.text.replace('```json', '').replace('```', '').strip()
-        parsed_data = json.loads(text)
+        for model_name in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[prompt, img]
+                )
+                # Clean response in case it has markdown markers
+                text = response.text.replace('```json', '').replace('```', '').strip()
+                parsed_data = json.loads(text)
+                return jsonify({"data": parsed_data}), 200
+            except Exception as model_err:
+                last_error = model_err
+                print(f"Model {model_name} failed: {model_err}")
+                continue
         
-        return jsonify({"data": parsed_data}), 200
+        # All models failed
+        raise last_error
     except Exception as e:
         import traceback
         traceback.print_exc()
