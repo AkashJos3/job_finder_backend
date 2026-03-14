@@ -11,7 +11,7 @@ from flask_cors import CORS
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import PIL.Image
-from google import genai
+# google-genai SDK no longer needed — using direct REST API for Gemini
 
 # Load environment variables
 load_dotenv()
@@ -147,15 +147,15 @@ def parse_job_poster():
         if not api_key:
             return jsonify({"error": "GEMINI_API_KEY not configured on server"}), 500
 
-        # Initialize the new google-genai client
-        client = genai.Client(api_key=api_key)
-
         # Remove header from base64 string if present (e.g. data:image/jpeg;base64,...)
+        mime_type = 'image/jpeg'
         if ',' in image_data:
+            header = image_data.split(',')[0]
+            if 'png' in header:
+                mime_type = 'image/png'
+            elif 'webp' in header:
+                mime_type = 'image/webp'
             image_data = image_data.split(',')[1]
-
-        image_bytes = base64.b64decode(image_data)
-        img = PIL.Image.open(io.BytesIO(image_bytes))
 
         prompt = """
         Extract the following information from this job poster image.
@@ -167,27 +167,49 @@ def parse_job_poster():
         Do not include markdown formatting or json code blocks, just raw JSON.
         """
 
-        # Try multiple models as fallback (free-tier availability varies by region)
-        models_to_try = ['gemini-2.0-flash-lite', 'gemini-2.0-flash', 'gemini-1.5-flash-8b']
-        last_error = None
+        # Use direct REST API to bypass SDK version issues
+        # Try multiple models and API versions as fallback
+        models_to_try = [
+            ('v1beta', 'gemini-2.0-flash-lite'),
+            ('v1beta', 'gemini-2.0-flash'),
+            ('v1', 'gemini-1.5-flash'),
+            ('v1', 'gemini-pro-vision'),
+        ]
         
-        for model_name in models_to_try:
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": mime_type, "data": image_data}}
+                ]
+            }]
+        }
+        
+        last_error = None
+        for api_ver, model_name in models_to_try:
             try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=[prompt, img]
-                )
+                url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent?key={api_key}"
+                resp = requests.post(url, json=payload, timeout=60)
+                
+                if resp.status_code != 200:
+                    err_msg = resp.json().get('error', {}).get('message', resp.text)
+                    print(f"Model {model_name} ({api_ver}) failed: {resp.status_code} - {err_msg}")
+                    last_error = f"{model_name}: {err_msg}"
+                    continue
+                
+                result = resp.json()
+                text = result['candidates'][0]['content']['parts'][0]['text']
                 # Clean response in case it has markdown markers
-                text = response.text.replace('```json', '').replace('```', '').strip()
+                text = text.replace('```json', '').replace('```', '').strip()
                 parsed_data = json.loads(text)
                 return jsonify({"data": parsed_data}), 200
             except Exception as model_err:
-                last_error = model_err
-                print(f"Model {model_name} failed: {model_err}")
+                last_error = str(model_err)
+                print(f"Model {model_name} ({api_ver}) exception: {model_err}")
                 continue
         
         # All models failed
-        raise last_error
+        return jsonify({"error": f"All AI models failed. Last error: {last_error}"}), 500
     except Exception as e:
         import traceback
         traceback.print_exc()

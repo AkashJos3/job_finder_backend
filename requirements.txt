@@ -4,5 +4,4 @@ supabase
 python-dotenv
 requests
 pillow
-google-genai
 gunicorn
