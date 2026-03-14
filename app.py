@@ -1148,12 +1148,182 @@ def toggle_ban_user(user_id):
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+# --- AI DOCUMENT VERIFICATION HELPERS ---
+
+def validate_id_format(id_number):
+    """Validate Indian ID number formats (Aadhaar, PAN, GSTIN)"""
+    import re
+    result = {"type": "unknown", "valid": False, "details": ""}
+    
+    if not id_number:
+        return result
+    
+    clean = id_number.strip().upper().replace(" ", "")
+    
+    # PAN: ABCDE1234F
+    if re.match(r'^[A-Z]{5}[0-9]{4}[A-Z]$', clean):
+        result["type"] = "PAN"
+        result["valid"] = True
+        result["details"] = f"Valid PAN format: {clean}"
+        return result
+    
+    # GSTIN: 15 chars, starts with 2-digit state code
+    if re.match(r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][A-Z0-9]Z[A-Z0-9]$', clean):
+        result["type"] = "GSTIN"
+        result["valid"] = True
+        result["details"] = f"Valid GSTIN format: {clean}"
+        return result
+    
+    # Aadhaar: 12 digits with Verhoeff checksum
+    if re.match(r'^[0-9]{12}$', clean):
+        result["type"] = "Aadhaar"
+        # Verhoeff checksum validation
+        verhoeff_table_d = [
+            [0,1,2,3,4,5,6,7,8,9],[1,2,3,4,0,6,7,8,9,5],
+            [2,3,4,0,1,7,8,9,5,6],[3,4,0,1,2,8,9,5,6,7],
+            [4,0,1,2,3,9,5,6,7,8],[5,9,8,7,6,0,4,3,2,1],
+            [6,5,9,8,7,1,0,4,3,2],[7,6,5,9,8,2,1,0,4,3],
+            [8,7,6,5,9,3,2,1,0,4],[9,8,7,6,5,4,3,2,1,0]
+        ]
+        verhoeff_table_p = [
+            [0,1,2,3,4,5,6,7,8,9],[1,5,7,6,2,8,3,0,9,4],
+            [5,8,0,3,7,9,6,1,4,2],[8,9,1,6,0,4,3,5,2,7],
+            [9,4,5,3,1,2,6,8,7,0],[4,2,8,6,5,7,3,9,0,1],
+            [2,7,9,3,8,0,6,4,1,5],[7,0,4,6,9,1,3,2,5,8]
+        ]
+        verhoeff_table_inv = [0,4,3,2,1,5,6,7,8,9]
+        
+        try:
+            c = 0
+            for i, digit in enumerate(reversed(clean)):
+                c = verhoeff_table_d[c][verhoeff_table_p[i % 8][int(digit)]]
+            result["valid"] = (c == 0)
+            result["details"] = f"Aadhaar format {'valid' if result['valid'] else 'INVALID checksum'}: {clean[:4]}****{clean[8:]}"
+        except:
+            result["valid"] = False
+            result["details"] = "Could not validate Aadhaar checksum"
+        return result
+    
+    # Shop/Establishment Registration (generic numeric)
+    if re.match(r'^[A-Z0-9]{6,20}$', clean):
+        result["type"] = "Registration Number"
+        result["valid"] = True
+        result["details"] = f"Registration number format: {clean}"
+        return result
+    
+    result["details"] = f"Unrecognized ID format: {clean}"
+    return result
+
+
+def analyze_document_with_ai(document_url, business_name, registration_number):
+    """Analyze an employer's verification document using Groq Llama 4 Vision"""
+    try:
+        api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            return {"error": "GROQ_API_KEY not configured", "confidence": 0}
+        
+        # Ensure proper data URL
+        image_data = document_url
+        if not image_data.startswith('data:'):
+            image_data = f"data:image/jpeg;base64,{image_data}"
+        
+        prompt = f"""You are a KYC (Know Your Customer) verification AI for an employment platform in India.
+Analyze this business verification document carefully.
+
+The employer claims:
+- Business Name: "{business_name}"
+- Registration/ID Number: "{registration_number}"
+
+Examine the document and return ONLY a raw JSON object with these exact keys:
+- document_type: What type of document is this? (e.g. "Aadhaar Card", "PAN Card", "GSTIN Certificate", "Shop License", "Business Registration", "Unknown")
+- extracted_name: The name/business name visible on the document. If not readable, use "".
+- extracted_id: The ID/registration number visible on the document. If not readable, use "".
+- is_authentic: true or false - does this look like a genuine government/official document?
+- confidence: A number from 0 to 100 indicating your confidence in the document's authenticity
+- red_flags: An array of strings listing any concerns (e.g. "Blurry text", "Possible editing detected", "Missing official seal", "Expired document")
+- summary: A one-sentence assessment of the document
+
+Do not include markdown formatting or json code blocks, just raw JSON."""
+
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_data}}
+                    ]
+                }
+            ],
+            "max_tokens": 1024,
+            "temperature": 0.1
+        }
+        
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        
+        if resp.status_code != 200:
+            return {"error": f"AI request failed: {resp.status_code}", "confidence": 0}
+        
+        result = resp.json()
+        text = result['choices'][0]['message']['content']
+        text = text.replace('```json', '').replace('```', '').strip()
+        ai_report = json.loads(text)
+        
+        # Layer 2: Format validation on the registration number
+        id_validation = validate_id_format(registration_number)
+        ai_report["id_format_check"] = id_validation
+        
+        # Layer 3: Cross-reference names
+        extracted = (ai_report.get("extracted_name") or "").strip().lower()
+        claimed = (business_name or "").strip().lower()
+        if extracted and claimed:
+            # Simple fuzzy match: check if one contains the other
+            name_match = extracted in claimed or claimed in extracted or extracted == claimed
+            ai_report["name_match"] = name_match
+            if not name_match:
+                ai_report.setdefault("red_flags", []).append(
+                    f"Name mismatch: document shows '{ai_report.get('extracted_name')}' but account registered as '{business_name}'"
+                )
+                # Reduce confidence if names don't match
+                ai_report["confidence"] = max(0, ai_report.get("confidence", 50) - 20)
+        else:
+            ai_report["name_match"] = None
+        
+        # Reduce confidence if ID format is invalid
+        if not id_validation["valid"] and id_validation["type"] != "unknown":
+            ai_report.setdefault("red_flags", []).append(f"Invalid {id_validation['type']} format")
+            ai_report["confidence"] = max(0, ai_report.get("confidence", 50) - 15)
+        
+        # Final recommendation
+        confidence = ai_report.get("confidence", 0)
+        red_flags = ai_report.get("red_flags", [])
+        if confidence >= 85 and len(red_flags) == 0:
+            ai_report["recommendation"] = "auto_approve"
+        elif confidence >= 50:
+            ai_report["recommendation"] = "manual_review"
+        else:
+            ai_report["recommendation"] = "likely_reject"
+        
+        return ai_report
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e), "confidence": 0, "recommendation": "manual_review"}
+
+
 # --- ADMIN / VERIFICATIONS API ---
 
 @app.route('/api/verifications', methods=['POST'])
 @require_auth
 def submit_verification():
-    """Employer submits KYC documents for verification"""
+    """Employer submits KYC documents for verification — AI auto-analyzes"""
     try:
         data = request.json
         employer_id = request.user.id
@@ -1163,12 +1333,27 @@ def submit_verification():
         if not profile_res.data or profile_res.data[0]['role'] != 'employer':
             return jsonify({"error": "Forbidden", "message": "Only employers can submit verifications"}), 403
             
+        business_name = data.get("business_name")
+        registration_number = data.get("registration_number")
+        document_url = data.get("document_url")
+        
+        # Run AI analysis on the document
+        ai_report = {}
+        if document_url:
+            ai_report = analyze_document_with_ai(document_url, business_name, registration_number)
+        
+        # Determine initial status based on AI confidence
+        status = "pending"
+        if ai_report.get("recommendation") == "auto_approve":
+            status = "approved"
+        
         verif_data = {
             "employer_id": employer_id,
-            "business_name": data.get("business_name"),
-            "registration_number": data.get("registration_number"),
-            "document_url": data.get("document_url"),
-            "status": "pending"
+            "business_name": business_name,
+            "registration_number": registration_number,
+            "document_url": document_url,
+            "status": status,
+            "ai_analysis": json.dumps(ai_report) if ai_report else None
         }
 
         # Check if verification already exists
@@ -1179,8 +1364,12 @@ def submit_verification():
         else:
             # Insert a new record
             response = supabase.table('employer_verifications').insert(verif_data).execute()
+        
+        # If auto-approved, also update the employer profile
+        if status == "approved":
+            supabase.table('profiles').update({'is_verified': True}).eq('id', employer_id).execute()
             
-        return jsonify({"data": response.data[0] if response.data else {}}), 201
+        return jsonify({"data": response.data[0] if response.data else {}, "ai_analysis": ai_report}), 201
     except Exception as e:
         import traceback
         traceback.print_exc()
