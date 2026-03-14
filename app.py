@@ -894,7 +894,7 @@ def get_employer_analytics():
             d = datetime.now() - timedelta(days=i)
             day_name = d.strftime('%a') # Mon, Tue, etc
             date_str = d.strftime('%Y-%m-%d')
-            days.append({'date': date_str, 'name': day_name, 'applications': 0, 'views': 0})
+            days.append({'date': date_str, 'name': day_name, 'applications': 0})
             
         # Count applications per day
         for app in apps:
@@ -903,11 +903,6 @@ def get_employer_analytics():
                 if day['date'] == app_date:
                     day['applications'] += 1
                     break
-                    
-        # Simulate views (random 2.5x to 4x of applications + a small baseline)
-        for day in days:
-            base_views = random.randint(15, 60)
-            day['views'] = int(day['applications'] * random.uniform(2.5, 4.0)) + base_views
             
         return jsonify({"data": days}), 200
     except Exception as e:
