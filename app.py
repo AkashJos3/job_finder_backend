@@ -755,6 +755,34 @@ def get_student_applications():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/applications/<application_id>/withdraw', methods=['PUT'])
+@require_auth
+def withdraw_application(application_id):
+    """Student withdraws their own pending application"""
+    try:
+        student_id = request.user.id
+
+        # Verify this application belongs to the student
+        app_res = supabase.table('applications').select('id, student_id, status').eq('id', application_id).execute()
+        if not app_res.data:
+            return jsonify({"error": "Application not found"}), 404
+
+        app = app_res.data[0]
+        if app['student_id'] != student_id:
+            return jsonify({"error": "Forbidden", "message": "You can only withdraw your own applications"}), 403
+
+        if app['status'] not in ('pending', 'Pending'):
+            return jsonify({"error": "Cannot withdraw", "message": "Only pending applications can be withdrawn"}), 400
+
+        # Delete the application
+        supabase.table('applications').delete().eq('id', application_id).execute()
+
+        return jsonify({"message": "Application withdrawn successfully"}), 200
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/auth/check-email', methods=['POST'])
 def check_email_exists():
     """Validates if an email is registered in the system to prevent OTP bypass signup"""
