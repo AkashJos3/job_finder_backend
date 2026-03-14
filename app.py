@@ -1168,7 +1168,7 @@ def validate_id_format(id_number):
         return result
     
     # GSTIN: 15 chars, starts with 2-digit state code
-    if re.match(r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][A-Z0-9]Z[A-Z0-9]$', clean):
+    if re.match(r'^[0-1][1-9][A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$|^[2-3][0-9][A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$', clean):
         result["type"] = "GSTIN"
         result["valid"] = True
         result["details"] = f"Valid GSTIN format: {clean}"
@@ -1191,7 +1191,6 @@ def validate_id_format(id_number):
             [9,4,5,3,1,2,6,8,7,0],[4,2,8,6,5,7,3,9,0,1],
             [2,7,9,3,8,0,6,4,1,5],[7,0,4,6,9,1,3,2,5,8]
         ]
-        verhoeff_table_inv = [0,4,3,2,1,5,6,7,8,9]
         
         try:
             c = 0
@@ -1204,14 +1203,14 @@ def validate_id_format(id_number):
             result["details"] = "Could not validate Aadhaar checksum"
         return result
     
-    # Shop/Establishment Registration (generic numeric)
-    if re.match(r'^[A-Z0-9]{6,20}$', clean):
-        result["type"] = "Registration Number"
-        result["valid"] = True
-        result["details"] = f"Registration number format: {clean}"
-        return result
+    # Strict generic numeric registration (only if exactly 6-20 length, with a healthy mix of letters/numbers usually, not just random letters)
+    # We will remove the generic fallback that caught ASDFGH123456 as valid.
+    # Now, if it isn't PAN, GSTIN, or Aadhaar, we just return it as unvalidated generic.
     
-    result["details"] = f"Unrecognized ID format: {clean}"
+    result["details"] = f"Unrecognized/Generic ID format: {clean}"
+    # Still return valid=True so it doesn't instantly penalize them if they uploaded a legit local shop license that doesn't follow federal formats
+    result["valid"] = True 
+    result["type"] = "Generic ID"
     return result
 
 
@@ -1230,18 +1229,18 @@ def analyze_document_with_ai(document_url, business_name, registration_number):
         prompt = f"""You are a KYC (Know Your Customer) verification AI for an employment platform in India.
 Analyze this business verification document carefully.
 
-The employer claims:
-- Business Name: "{business_name}"
-- Registration/ID Number: "{registration_number}"
+Reference Data provided by user:
+- Claimed Name: "{business_name}"
+- Claimed ID: "{registration_number}"
 
-Examine the document and return ONLY a raw JSON object with these exact keys:
+Examine the document image and return ONLY a raw JSON object with these exact keys:
 - document_type: What type of document is this? (e.g. "Aadhaar Card", "PAN Card", "GSTIN Certificate", "Shop License", "Business Registration", "Unknown")
-- extracted_name: The name/business name visible on the document. If not readable, use "".
-- extracted_id: The ID/registration number visible on the document. If not readable, use "".
-- is_authentic: true or false - does this look like a genuine government/official document?
-- confidence: A number from 0 to 100 indicating your confidence in the document's authenticity
-- red_flags: An array of strings listing any concerns (e.g. "Blurry text", "Possible editing detected", "Missing official seal", "Expired document")
-- summary: A one-sentence assessment of the document
+- extracted_name: Extract the name exactly as it appears on the document. Look hard for it. If absolutely unreadable, use "".
+- extracted_id: Extract the ID/registration number exactly as it appears. If absolutely unreadable, use "".
+- is_authentic: true or false - does this look like a genuine document?
+- confidence: A number from 0 to 100 indicating your confidence in the document's authenticity.
+- red_flags: An array of strings listing genuine concerns (e.g. "Blurry text", "Possible editing detected", "Missing official seal", "Expired document"). Do NOT flag "Missing photo" or "Blank photo area" UNLESS the document type strictly requires a photo (like Aadhaar/DL). For text-only certificates, a missing photo is NORMAL. 
+- summary: A one-sentence assessment of the document.
 
 Do not include markdown formatting or json code blocks, just raw JSON."""
 
