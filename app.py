@@ -143,59 +143,58 @@ def parse_job_poster():
         if not image_data:
             return jsonify({"error": "No image data provided"}), 400
             
-        api_key = os.environ.get("GEMINI_API_KEY")
+        api_key = os.environ.get("GROQ_API_KEY")
         if not api_key:
-            return jsonify({"error": "GEMINI_API_KEY not configured on server"}), 500
+            return jsonify({"error": "GROQ_API_KEY not configured on server"}), 500
 
-        # Remove header from base64 string if present (e.g. data:image/jpeg;base64,...)
-        mime_type = 'image/jpeg'
-        if ',' in image_data:
-            header = image_data.split(',')[0]
-            if 'png' in header:
-                mime_type = 'image/png'
-            elif 'webp' in header:
-                mime_type = 'image/webp'
-            image_data = image_data.split(',')[1]
+        # Ensure we have a proper data URL for the image
+        if not image_data.startswith('data:'):
+            image_data = f"data:image/jpeg;base64,{image_data}"
 
-        prompt = """
-        Extract the following information from this job poster image.
-        Return ONLY a raw JSON object with these exact keys:
-        - title: The job title (e.g. "Cashier", "Tutor")
-        - description: A brief summary of the role and responsibilities.
-        - wage: The pay or wage mentioned, just the number (e.g. "500"). If not found, use "".
-        - requirements: Any shift timings or requirements mentioned (e.g. "Weekends only", "Morning shift").
-        Do not include markdown formatting or json code blocks, just raw JSON.
-        """
+        prompt = """Extract the following information from this job poster image.
+Return ONLY a raw JSON object with these exact keys:
+- title: The job title (e.g. "Cashier", "Tutor")
+- description: A brief summary of the role and responsibilities.
+- wage: The pay or wage mentioned, just the number (e.g. "500"). If not found, use "".
+- requirements: Any shift timings or requirements mentioned (e.g. "Weekends only", "Morning shift").
+Do not include markdown formatting or json code blocks, just raw JSON."""
 
-        # Use direct REST API
-        model_name = 'gemini-1.5-flash-latest'
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        
+        # Use Groq's free Vision API (Llama 3.2 Vision)
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
         payload = {
-            "contents": [{
-                "parts": [
-                    {"text": prompt},
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": image_data
+            "model": "llama-3.2-90b-vision-preview",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": image_data}
                         }
-                    }
-                ]
-            }]
+                    ]
+                }
+            ],
+            "max_tokens": 1024,
+            "temperature": 0.1
         }
         
-        resp = requests.post(url, json=payload, timeout=60)
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
         
         if resp.status_code != 200:
-            err_msg = resp.json()
-            return jsonify({"error": f"AI Parsing Error: {resp.status_code}. {err_msg}"}), 500
+            err_detail = resp.text
+            try:
+                err_detail = resp.json().get('error', {}).get('message', resp.text)
+            except:
+                pass
+            return jsonify({"error": f"AI Parsing Error ({resp.status_code}): {err_detail}"}), 500
             
         result = resp.json()
-        if 'candidates' not in result or not result['candidates']:
-            return jsonify({"error": "AI returned no data"}), 500
-            
-        text = result['candidates'][0]['content']['parts'][0]['text']
+        text = result['choices'][0]['message']['content']
         # Clean response in case it has markdown markers
         text = text.replace('```json', '').replace('```', '').strip()
         parsed_data = json.loads(text)
