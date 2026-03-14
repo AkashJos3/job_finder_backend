@@ -167,49 +167,39 @@ def parse_job_poster():
         Do not include markdown formatting or json code blocks, just raw JSON.
         """
 
-        # Use direct REST API to bypass SDK version issues
-        # Try multiple models and API versions as fallback
-        models_to_try = [
-            ('v1beta', 'gemini-2.0-flash-lite'),
-            ('v1beta', 'gemini-2.0-flash'),
-            ('v1', 'gemini-1.5-flash'),
-            ('v1', 'gemini-pro-vision'),
-        ]
+        # Use direct REST API
+        model_name = 'gemini-1.5-flash-latest'
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         
         payload = {
             "contents": [{
                 "parts": [
                     {"text": prompt},
-                    {"inline_data": {"mime_type": mime_type, "data": image_data}}
+                    {
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": image_data
+                        }
+                    }
                 ]
             }]
         }
         
-        last_error = None
-        for api_ver, model_name in models_to_try:
-            try:
-                url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent?key={api_key}"
-                resp = requests.post(url, json=payload, timeout=60)
-                
-                if resp.status_code != 200:
-                    err_msg = resp.json().get('error', {}).get('message', resp.text)
-                    print(f"Model {model_name} ({api_ver}) failed: {resp.status_code} - {err_msg}")
-                    last_error = f"{model_name}: {err_msg}"
-                    continue
-                
-                result = resp.json()
-                text = result['candidates'][0]['content']['parts'][0]['text']
-                # Clean response in case it has markdown markers
-                text = text.replace('```json', '').replace('```', '').strip()
-                parsed_data = json.loads(text)
-                return jsonify({"data": parsed_data}), 200
-            except Exception as model_err:
-                last_error = str(model_err)
-                print(f"Model {model_name} ({api_ver}) exception: {model_err}")
-                continue
+        resp = requests.post(url, json=payload, timeout=60)
         
-        # All models failed
-        return jsonify({"error": f"All AI models failed. Last error: {last_error}"}), 500
+        if resp.status_code != 200:
+            err_msg = resp.json()
+            return jsonify({"error": f"AI Parsing Error: {resp.status_code}. {err_msg}"}), 500
+            
+        result = resp.json()
+        if 'candidates' not in result or not result['candidates']:
+            return jsonify({"error": "AI returned no data"}), 500
+            
+        text = result['candidates'][0]['content']['parts'][0]['text']
+        # Clean response in case it has markdown markers
+        text = text.replace('```json', '').replace('```', '').strip()
+        parsed_data = json.loads(text)
+        return jsonify({"data": parsed_data}), 200
     except Exception as e:
         import traceback
         traceback.print_exc()
