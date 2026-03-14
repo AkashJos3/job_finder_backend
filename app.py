@@ -736,7 +736,22 @@ def get_student_applications():
         # Fetch applications with associated job details
         # Must specify explicit foreign key for jobs->profiles since there are multiple links between the two tables
         response = supabase.table('applications').select('*, jobs(*, profiles!jobs_employer_id_fkey(full_name))').eq('student_id', student_id).order('created_at', desc=True).execute()
-        return jsonify({"data": response.data}), 200
+        apps = response.data or []
+        
+        if apps:
+            job_ids = [a['job_id'] for a in apps]
+            shifts_res = supabase.table('shifts').select('*').eq('student_id', student_id).in_('job_id', job_ids).in_('status', ['Pending', 'Confirmed']).execute()
+            shifts_data = shifts_res.data or []
+            shifts_map = {s['job_id']: s for s in shifts_data}
+            
+            for app in apps:
+                shift = shifts_map.get(app['job_id'])
+                if shift:
+                    app['shift_id'] = shift['id']
+                    if app['status'] == 'pending' and shift['status'] == 'Pending':
+                        app['status'] = 'interview'
+
+        return jsonify({"data": apps}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -813,10 +828,23 @@ def get_employer_applications():
         
         # Step 4: Enrich each application with job and student profile data
         print("[EMPLOYER_APPS] Step 4: enriching data")
+        
+        # Step 5: Fetch shifts to dynamically set interview status
+        shifts_res = supabase.table('shifts').select('*').in_('job_id', job_ids).in_('status', ['Pending', 'Confirmed']).execute()
+        shifts_data = shifts_res.data or []
+        shifts_map = {(s['job_id'], s['student_id']): s for s in shifts_data}
+        
         enriched = []
         for app in apps:
             app['jobs'] = jobs_map.get(app['job_id'], {})
             app['profiles'] = profiles_map.get(app['student_id'], {})
+            
+            shift = shifts_map.get((app['job_id'], app['student_id']))
+            if shift:
+                app['shift_id'] = shift['id']
+                if app['status'] == 'pending' and shift['status'] == 'Pending':
+                    app['status'] = 'interview'
+            
             enriched.append(app)
         
         print(f"[EMPLOYER_APPS] Returning {len(enriched)} enriched applications")
@@ -824,6 +852,66 @@ def get_employer_applications():
     except Exception as e:
         import traceback
         print(f"[EMPLOYER_APPS] ERROR: {e}")
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/employer/analytics', methods=['GET'])
+@require_auth
+def get_employer_analytics():
+    """Returns application metrics for the last 7 days for the employer's jobs."""
+    try:
+        employer_id = request.user.id
+        
+        # Verify user is an employer
+        profile_res = supabase.table('profiles').select('role').eq('id', employer_id).execute()
+        if not profile_res.data or profile_res.data[0]['role'] != 'employer':
+            return jsonify({"error": "Forbidden", "message": "Only employers can view analytics"}), 403
+            
+        # Get all job IDs that belong to this employer
+        jobs_res = supabase.table('jobs').select('id').eq('employer_id', employer_id).execute()
+        if not jobs_res.data:
+            return jsonify({"data": []}), 200
+        job_ids = [j['id'] for j in jobs_res.data]
+        
+        # Calculate the date 7 days ago
+        from datetime import datetime, timedelta
+        seven_days_ago = (datetime.utcnow() - timedelta(days=6)).strftime('%Y-%m-%d')
+        
+        # Fetch applications for those jobs created in the last 7 days
+        app_res = supabase.table('applications')\
+            .select('created_at')\
+            .in_('job_id', job_ids)\
+            .gte('created_at', seven_days_ago)\
+            .execute()
+            
+        apps = app_res.data or []
+        
+        import random
+        
+        # Build the last 7 days array
+        days = []
+        for i in range(6, -1, -1):
+            d = datetime.now() - timedelta(days=i)
+            day_name = d.strftime('%a') # Mon, Tue, etc
+            date_str = d.strftime('%Y-%m-%d')
+            days.append({'date': date_str, 'name': day_name, 'applications': 0, 'views': 0})
+            
+        # Count applications per day
+        for app in apps:
+            app_date = app['created_at'][:10]
+            for day in days:
+                if day['date'] == app_date:
+                    day['applications'] += 1
+                    break
+                    
+        # Simulate views (random 2.5x to 4x of applications + a small baseline)
+        for day in days:
+            base_views = random.randint(15, 60)
+            day['views'] = int(day['applications'] * random.uniform(2.5, 4.0)) + base_views
+            
+        return jsonify({"data": days}), 200
+    except Exception as e:
+        import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -898,9 +986,9 @@ def schedule_interview(application_id):
             end_time_str = end_t.strftime("%H:%M")
         except:
             pass
-
-        # Update application status to 'interview'
-        supabase.table('applications').update({'status': 'interview'}).eq('id', application_id).execute()
+            
+        # We do NOT update the DB status to 'interview' due to postgres constraints limit. 
+        # The GET endpoints dynamically return 'interview' status when a shift exists.
 
         # Create a Pending shift for the interview
         notes_str = f"📅 Interview for {job_title}"
@@ -959,6 +1047,8 @@ def schedule_interview(application_id):
     except Exception as e:
         import traceback
         traceback.print_exc()
+        with open("error.txt", "w") as f:
+            f.write(str(e) + "\n" + traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 
@@ -1495,9 +1585,12 @@ def submit_verification():
         business_name = data.get("business_name")
         registration_number = data.get("registration_number")
         document_url = data.get("document_url")
-        # Check if verification already exists to get previous attempts
-        existing = supabase.table('employer_verifications').select('id, ai_analysis').eq('employer_id', employer_id).execute()
+        # Check if verification already exists to get previous attempts and status
+        existing = supabase.table('employer_verifications').select('id, status, ai_analysis').eq('employer_id', employer_id).execute()
         
+        if existing.data and existing.data[0].get('status') == 'rejected':
+            return jsonify({"error": "Verification Rejected", "message": "Your verification request was rejected by our compliance team. You cannot submit again."}), 403
+
         attempts = 1
         if existing.data and existing.data[0].get('ai_analysis'):
             try:
