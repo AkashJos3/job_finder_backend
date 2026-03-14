@@ -11,7 +11,7 @@ from flask_cors import CORS
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import PIL.Image
-import google.generativeai as genai
+from google import genai
 
 # Load environment variables
 load_dotenv()
@@ -146,9 +146,9 @@ def parse_job_poster():
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             return jsonify({"error": "GEMINI_API_KEY not configured on server"}), 500
-            
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+
+        # Initialize the new google-genai client
+        client = genai.Client(api_key=api_key)
 
         # Remove header from base64 string if present (e.g. data:image/jpeg;base64,...)
         if ',' in image_data:
@@ -166,7 +166,11 @@ def parse_job_poster():
         - requirements: Any shift timings or requirements mentioned (e.g. "Weekends only", "Morning shift").
         Do not include markdown formatting or json code blocks, just raw JSON.
         """
-        response = model.generate_content([prompt, img])
+
+        response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=[prompt, img]
+        )
         
         # Clean response in case it has markdown markers
         text = response.text.replace('```json', '').replace('```', '').strip()
