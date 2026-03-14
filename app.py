@@ -860,6 +860,152 @@ def update_application_status():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# --- INTERVIEW SCHEDULER API ---
+
+@app.route('/api/applications/<application_id>/schedule_interview', methods=['PUT'])
+@require_auth
+def schedule_interview(application_id):
+    """Employer schedules an interview for an applicant.
+    Stores interview info as a Pending shift in the shifts table."""
+    try:
+        employer_id = request.user.id
+        data = request.json
+        interview_date = data.get('interview_date')
+        interview_time = data.get('interview_time')
+        interview_link = data.get('interview_link', '')
+        interview_notes = data.get('interview_notes', '')
+
+        if not interview_date or not interview_time:
+            return jsonify({"error": "Date and time are required"}), 400
+
+        # Verify the application belongs to a job owned by this employer
+        app_res = supabase.table('applications').select('*, jobs!inner(employer_id, title, id)').eq('id', application_id).execute()
+        if not app_res.data:
+            return jsonify({"error": "Application not found"}), 404
+        if app_res.data[0]['jobs']['employer_id'] != employer_id:
+            return jsonify({"error": "Forbidden", "message": "You do not own this job"}), 403
+
+        student_id = app_res.data[0]['student_id']
+        job_title = app_res.data[0]['jobs'].get('title', 'a job')
+        job_id = app_res.data[0]['jobs'].get('id')
+
+        # Calculate end time (1 hour after start)
+        end_time_str = interview_time
+        try:
+            from datetime import timedelta
+            t = datetime.strptime(interview_time, "%H:%M")
+            end_t = t + timedelta(hours=1)
+            end_time_str = end_t.strftime("%H:%M")
+        except:
+            pass
+
+        # Update application status to 'interview'
+        supabase.table('applications').update({'status': 'interview'}).eq('id', application_id).execute()
+
+        # Create a Pending shift for the interview
+        notes_str = f"📅 Interview for {job_title}"
+        if interview_link:
+            notes_str += f" | Link: {interview_link}"
+        if interview_notes:
+            notes_str += f" | {interview_notes}"
+
+        shift_data = {
+            'employer_id': employer_id,
+            'job_id': job_id,
+            'student_id': student_id,
+            'shift_date': interview_date,
+            'start_time': interview_time,
+            'end_time': end_time_str,
+            'status': 'Pending',
+            'notes': notes_str
+        }
+        shift_res = supabase.table('shifts').insert(shift_data).execute()
+
+        # Format a human-readable date for the notification
+        try:
+            d_obj = datetime.strptime(interview_date, "%Y-%m-%d")
+            formatted_date = d_obj.strftime("%B %d, %Y")
+        except:
+            formatted_date = interview_date
+
+        # Notify the student
+        create_notification(
+            student_id,
+            f"📅 Interview scheduled for {job_title} on {formatted_date} at {interview_time}. Check your Schedule to accept!",
+            "interview"
+        )
+
+        # Send a special interview message in chat
+        interview_details = {
+            "interview_date": interview_date,
+            "interview_time": interview_time,
+            "interview_link": interview_link,
+            "interview_notes": interview_notes,
+            "job_title": job_title,
+            "application_id": application_id,
+            "shift_id": shift_res.data[0]['id'] if shift_res.data else None
+        }
+        interview_msg = f"[INTERVIEW_PROPOSAL]{json.dumps(interview_details)}"
+        try:
+            supabase.table('messages').insert({
+                'sender_id': employer_id,
+                'receiver_id': student_id,
+                'content': interview_msg
+            }).execute()
+        except Exception as msg_err:
+            print(f"Failed to send interview chat message: {msg_err}")
+
+        return jsonify({"message": "Interview scheduled successfully", "data": shift_res.data[0] if shift_res.data else {}}), 200
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/applications/<application_id>/accept_interview', methods=['PUT'])
+@require_auth
+def accept_interview(application_id):
+    """Student accepts an interview — confirms the pending shift on their calendar"""
+    try:
+        student_id = request.user.id
+
+        # Verify the application belongs to this student
+        app_res = supabase.table('applications').select('*, jobs!inner(employer_id, title, id)').eq('id', application_id).execute()
+        if not app_res.data:
+            return jsonify({"error": "Application not found"}), 404
+        if app_res.data[0]['student_id'] != student_id:
+            return jsonify({"error": "Forbidden"}), 403
+        if app_res.data[0]['status'] != 'interview':
+            return jsonify({"error": "No pending interview to accept"}), 400
+
+        job_data = app_res.data[0]['jobs']
+        employer_id = job_data['employer_id']
+        job_title = job_data.get('title', 'Interview')
+        job_id = job_data.get('id')
+
+        # Update application status to accepted
+        supabase.table('applications').update({'status': 'accepted'}).eq('id', application_id).execute()
+
+        # Find and confirm the Pending shift for this interview
+        pending_shifts = supabase.table('shifts').select('*').eq('student_id', student_id).eq('job_id', job_id).eq('status', 'Pending').order('created_at', desc=True).limit(1).execute()
+        if pending_shifts.data:
+            supabase.table('shifts').update({'status': 'Confirmed'}).eq('id', pending_shifts.data[0]['id']).execute()
+
+        # Notify the employer
+        student_res = supabase.table('profiles').select('full_name').eq('id', student_id).execute()
+        student_name = student_res.data[0]['full_name'] if student_res.data else "A student"
+        create_notification(
+            employer_id,
+            f"✅ {student_name} accepted the interview for {job_title}!",
+            "interview"
+        )
+
+        return jsonify({"message": "Interview accepted! It has been added to your schedule."}), 200
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 # --- ADMIN / REPORTS & USERS API ---
 
 @app.route('/api/admin/dashboard/stats', methods=['GET'])
@@ -1349,11 +1495,29 @@ def submit_verification():
         business_name = data.get("business_name")
         registration_number = data.get("registration_number")
         document_url = data.get("document_url")
+        # Check if verification already exists to get previous attempts
+        existing = supabase.table('employer_verifications').select('id, ai_analysis').eq('employer_id', employer_id).execute()
         
+        attempts = 1
+        if existing.data and existing.data[0].get('ai_analysis'):
+            try:
+                old_stats = existing.data[0]['ai_analysis']
+                if isinstance(old_stats, str):
+                    old_stats = json.loads(old_stats)
+                attempts = old_stats.get("submission_attempts", 0) + 1
+            except:
+                pass
+
+        if attempts > 3:
+            return jsonify({"error": "Max attempts reached", "message": "You have reached the maximum number of verification attempts. Please contact support."}), 403
+
         # Run AI analysis on the document
         ai_report = {}
         if document_url:
             ai_report = analyze_document_with_ai(document_url, business_name, registration_number)
+            
+        # Add tracking data to AI report
+        ai_report["submission_attempts"] = attempts
         
         # Determine initial status based on AI confidence
         status = "pending"
@@ -1366,11 +1530,9 @@ def submit_verification():
             "registration_number": registration_number,
             "document_url": document_url,
             "status": status,
-            "ai_analysis": json.dumps(ai_report) if ai_report else None
+            "ai_analysis": json.dumps(ai_report) if ai_report else json.dumps({"submission_attempts": attempts})
         }
 
-        # Check if verification already exists
-        existing = supabase.table('employer_verifications').select('id').eq('employer_id', employer_id).execute()
         if existing.data:
             # Update the existing record so they can resubmit
             response = supabase.table('employer_verifications').update(verif_data).eq('employer_id', employer_id).execute()
@@ -1382,7 +1544,11 @@ def submit_verification():
         if status == "approved":
             supabase.table('profiles').update({'is_verified': True}).eq('id', employer_id).execute()
             
-        return jsonify({"data": response.data[0] if response.data else {}, "ai_analysis": ai_report}), 201
+        return jsonify({
+            "data": response.data[0] if response.data else {}, 
+            "ai_analysis": ai_report,
+            "attempts_remaining": 3 - attempts
+        }), 201
     except Exception as e:
         import traceback
         traceback.print_exc()
