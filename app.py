@@ -166,7 +166,7 @@ Do not include markdown formatting or json code blocks, just raw JSON."""
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "llama-3.2-90b-vision-preview",
+            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
             "messages": [
                 {
                     "role": "user",
