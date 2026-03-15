@@ -4,7 +4,7 @@ import math
 import io
 import base64
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -57,6 +57,32 @@ def health_check():
     """Lightweight endpoint for keep-alive pings. Prevents Render cold starts."""
     return jsonify({"status": "ok"}), 200
 
+# --- EMAIL HELPERS ---
+def get_user_email(user_id):
+    """
+    Tries to fetch the user's email from profiles, or falls back to a mock email.
+    """
+    try:
+        res = supabase.table('profiles').select('email').eq('id', user_id).execute()
+        if res.data and len(res.data) > 0 and res.data[0].get('email'):
+            return res.data[0]['email']
+    except:
+        pass
+    return "user@example.com"
+
+def send_email(to_email, subject, body):
+    """
+    Helper function to send email notifications.
+    Currently prints to console as a mock. Can be replaced with Resend/SendGrid later.
+    """
+    print(f"\n{'='*60}")
+    print(f"📧 MOCK EMAIL DISPATCH")
+    print(f"TO: {to_email}")
+    print(f"SUBJECT: {subject}")
+    print(f"BODY:\n{body}")
+    print(f"{'='*60}\n")
+    return True
+
 # --- GEOCODING & DISTANCE HELPERS ---
 
 def geocode_location(address):
@@ -90,6 +116,51 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 # --- GENERAL ---
 
 # --- JOBS API ---
+
+@app.route('/api/jobs/cleanup', methods=['POST', 'GET'])
+def cleanup_jobs():
+    """
+    Endpoint meant to be triggered by an external cron job (e.g., cron-job.org).
+    1. Close 'open' jobs whose job_date is in the past.
+    2. Expire 'pending' applications that are older than 7 days.
+    """
+    try:
+        today_date = datetime.now().strftime('%Y-%m-%d')
+        
+        # 1. Close expired jobs
+        open_jobs_res = supabase.table('jobs').select('id, job_date').eq('status', 'open').execute()
+        expired_jobs = []
+        if open_jobs_res.data:
+            for job in open_jobs_res.data:
+                if job.get('job_date') and job['job_date'] < today_date:
+                    expired_jobs.append(job['id'])
+                    
+        for jid in expired_jobs:
+            supabase.table('jobs').update({'status': 'closed'}).eq('id', jid).execute()
+
+        # 2. Expire old pending applications
+        threshold_date = (datetime.utcnow() - timedelta(days=7)).isoformat()
+        pending_apps_res = supabase.table('applications').select('id, created_at').eq('status', 'pending').execute()
+        
+        expired_apps = []
+        if pending_apps_res.data:
+            for app in pending_apps_res.data:
+                if app.get('created_at') and app['created_at'] < threshold_date:
+                    expired_apps.append(app['id'])
+
+        for aid in expired_apps:
+            supabase.table('applications').update({'status': 'rejected'}).eq('id', aid).execute()
+
+        return jsonify({
+            "message": "Cleanup successful",
+            "expired_jobs_count": len(expired_jobs),
+            "expired_applications_count": len(expired_apps)
+        }), 200
+
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/jobs', methods=['GET'])
 def get_jobs():
@@ -714,6 +785,13 @@ def apply_job():
             student_name = student_res.data[0]['full_name'] if student_res.data else "A student"
             
             create_notification(employer_id, f"{student_name} applied for {job_title}", "application")
+            
+            employer_email = get_user_email(employer_id)
+            send_email(
+                employer_email,
+                f"New Application for {job_title}",
+                f"Hello,\n\n{student_name} has just applied for your job '{job_title}'.\n\nLog in to AfterBell to review their application.\n\nBest,\nThe AfterBell Team"
+            )
 
         return jsonify({"data": response.data[0]}), 201
     except Exception as e:
@@ -967,6 +1045,13 @@ def update_application_status():
         job_title = app_res.data[0]['jobs'].get('title', 'a job')
         create_notification(student_id, f"Your application for {job_title} was {new_status}", "status_update")
         
+        student_email = get_user_email(student_id)
+        send_email(
+            student_email,
+            f"Application Update: {job_title}",
+            f"Hello,\n\nYour application for '{job_title}' was just {new_status} by the employer.\n\nLog in to AfterBell to view more details.\n\nBest,\nThe AfterBell Team"
+        )
+        
         return jsonify({"data": update_res.data[0], "message": f"Application {new_status} successfully"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1044,6 +1129,13 @@ def schedule_interview(application_id):
             student_id,
             f"📅 Interview scheduled for {job_title} on {formatted_date} at {interview_time}. Check your Schedule to accept!",
             "interview"
+        )
+        
+        student_email = get_user_email(student_id)
+        send_email(
+            student_email,
+            f"Interview Request: {job_title}",
+            f"Hello,\n\nYou have been invited to an interview for '{job_title}' on {formatted_date} at {interview_time}.\n\nLog in to AfterBell to accept or decline the interview request on your schedule.\n\nBest,\nThe AfterBell Team"
         )
 
         # Send a special interview message in chat
