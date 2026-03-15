@@ -1088,7 +1088,7 @@ def accept_interview(application_id):
             return jsonify({"error": "Application not found"}), 404
         if app_res.data[0]['student_id'] != student_id:
             return jsonify({"error": "Forbidden"}), 403
-        if app_res.data[0]['status'] != 'interview':
+        if app_res.data[0]['status'] not in ('interview', 'pending', 'Pending'):
             return jsonify({"error": "No pending interview to accept"}), 400
 
         job_data = app_res.data[0]['jobs']
@@ -1096,13 +1096,17 @@ def accept_interview(application_id):
         job_title = job_data.get('title', 'Interview')
         job_id = job_data.get('id')
 
+        # Find and confirm the Pending shift for this interview
+        pending_shifts = supabase.table('shifts').select('*').eq('student_id', student_id).eq('job_id', job_id).eq('status', 'Pending').order('created_at', desc=True).limit(1).execute()
+        
+        if not pending_shifts.data:
+            return jsonify({"error": "No pending interview to accept"}), 400
+
         # Update application status to accepted
         supabase.table('applications').update({'status': 'accepted'}).eq('id', application_id).execute()
 
-        # Find and confirm the Pending shift for this interview
-        pending_shifts = supabase.table('shifts').select('*').eq('student_id', student_id).eq('job_id', job_id).eq('status', 'Pending').order('created_at', desc=True).limit(1).execute()
-        if pending_shifts.data:
-            supabase.table('shifts').update({'status': 'Confirmed'}).eq('id', pending_shifts.data[0]['id']).execute()
+        # Confirm the shift
+        supabase.table('shifts').update({'status': 'Confirmed'}).eq('id', pending_shifts.data[0]['id']).execute()
 
         # Notify the employer
         student_res = supabase.table('profiles').select('full_name').eq('id', student_id).execute()
@@ -1114,6 +1118,54 @@ def accept_interview(application_id):
         )
 
         return jsonify({"message": "Interview accepted! It has been added to your schedule."}), 200
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/applications/<application_id>/decline_interview', methods=['PUT'])
+@require_auth
+def decline_interview(application_id):
+    """Student declines an interview — rejects the application and removes the pending shift"""
+    try:
+        student_id = request.user.id
+
+        # Verify the application belongs to this student
+        app_res = supabase.table('applications').select('*, jobs!inner(employer_id, title, id)').eq('id', application_id).execute()
+        if not app_res.data:
+            return jsonify({"error": "Application not found"}), 404
+        if app_res.data[0]['student_id'] != student_id:
+            return jsonify({"error": "Forbidden"}), 403
+        if app_res.data[0]['status'] not in ('interview', 'pending', 'Pending'):
+            return jsonify({"error": "No pending interview to decline"}), 400
+
+        job_data = app_res.data[0]['jobs']
+        job_id = job_data.get('id')
+        employer_id = job_data['employer_id']
+        job_title = job_data.get('title', 'Interview')
+
+        # Find the Pending shift for this interview
+        pending_shifts = supabase.table('shifts').select('*').eq('student_id', student_id).eq('job_id', job_id).eq('status', 'Pending').order('created_at', desc=True).limit(1).execute()
+        
+        if not pending_shifts.data:
+            return jsonify({"error": "No pending interview to decline"}), 400
+
+        # Update application status to rejected
+        supabase.table('applications').update({'status': 'rejected', 'notes': 'Student declined interview'}).eq('id', application_id).execute()
+
+        # Delete the proposed shift from calendar
+        supabase.table('shifts').delete().eq('id', pending_shifts.data[0]['id']).execute()
+
+        # Notify the employer
+        student_res = supabase.table('profiles').select('full_name').eq('id', student_id).execute()
+        student_name = student_res.data[0]['full_name'] if student_res.data else "A student"
+        create_notification(
+            employer_id,
+            f"❌ {student_name} declined the interview for {job_title}.",
+            "interview"
+        )
+
+        return jsonify({"message": "Interview declined successfully."}), 200
     except Exception as e:
         import traceback
         traceback.print_exc()
