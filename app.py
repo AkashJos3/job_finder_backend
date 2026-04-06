@@ -246,6 +246,7 @@ def create_job():
             "requirements": data.get("requirements"),
             "urgent": data.get("urgent", False),
             "image_url": data.get("image_url"),
+            "vacancies": data.get("vacancies", 1),
             "status": "open"
         }
         
@@ -269,7 +270,7 @@ def update_job(job_id):
         if not job_res.data or job_res.data[0]['employer_id'] != user_id:
             return jsonify({"error": "Unauthorized"}), 403
             
-        allowed_fields = ['title', 'description', 'location', 'wage', 'requirements', 'urgent', 'status', 'image_url']
+        allowed_fields = ['title', 'description', 'location', 'wage', 'requirements', 'urgent', 'status', 'image_url', 'vacancies']
         update_data = {k: v for k, v in data.items() if k in allowed_fields}
         
         # Re-geocode if location changed
@@ -939,7 +940,7 @@ def update_application_status():
             return jsonify({"error": "Missing application_id or status"}), 400
             
         # First verify the application belongs to a job owned by this employer
-        app_res = supabase.table('applications').select('*, jobs!inner(employer_id, title)').eq('id', application_id).execute()
+        app_res = supabase.table('applications').select('*, jobs!inner(employer_id, title, vacancies)').eq('id', application_id).execute()
         
         if not app_res.data or len(app_res.data) == 0:
              return jsonify({"error": "Not Found", "message": "Application not found"}), 404
@@ -947,14 +948,36 @@ def update_application_status():
         if app_res.data[0]['jobs']['employer_id'] != employer_id:
             return jsonify({"error": "Forbidden", "message": "You do not own this job"}), 403
             
+        vacancies = app_res.data[0]['jobs'].get('vacancies', 1)
+        job_id = app_res.data[0]['job_id']
+        job_closed = False
+
+        if new_status == 'accepted':
+            # Check current accepted count
+            accepted_res = supabase.table('applications').select('id', count='exact').eq('job_id', job_id).eq('status', 'accepted').execute()
+            current_accepted = accepted_res.count if hasattr(accepted_res, 'count') and accepted_res.count is not None else len(accepted_res.data)
+            
+            if current_accepted >= vacancies:
+                return jsonify({"error": "Vacancy Limit Reached", "message": "This job has already reached its maximum number of hires.", "auto_closed": True}), 400
+
         # Update the status
         update_res = supabase.table('applications').update({'status': new_status}).eq('id', application_id).execute()
+        
+        if new_status == 'accepted':
+            if current_accepted + 1 >= vacancies:
+                # Auto close the job to prevent more applicants!
+                supabase.table('jobs').update({'status': 'closed'}).eq('id', job_id).execute()
+                job_closed = True
         
         student_id = app_res.data[0]['student_id']
         job_title = app_res.data[0]['jobs'].get('title', 'a job')
         create_notification(student_id, f"Your application for {job_title} was {new_status}", "status_update")
         
-        return jsonify({"data": update_res.data[0], "message": f"Application {new_status} successfully"}), 200
+        return jsonify({
+            "data": update_res.data[0], 
+            "message": f"Application {new_status} successfully",
+            "auto_closed": job_closed
+        }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
