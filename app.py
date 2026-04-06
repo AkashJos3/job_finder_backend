@@ -306,7 +306,7 @@ def update_job(job_id):
         data = request.json
         
         # Verify ownership
-        job_res = supabase.table('jobs').select('employer_id').eq('id', job_id).execute()
+        job_res = supabase.table('jobs').select('employer_id, status, vacancies').eq('id', job_id).execute()
         if not job_res.data or job_res.data[0]['employer_id'] != user_id:
             return jsonify({"error": "Unauthorized"}), 403
             
@@ -316,6 +316,17 @@ def update_job(job_id):
         # Auto-clear pause_reason when re-opening a job
         if update_data.get('status') == 'open':
             update_data['pause_reason'] = None
+        
+        # If vacancies increased on a closed job, check if we should auto-reopen
+        current_status = job_res.data[0].get('status', 'open') if 'status' not in update_data else update_data['status']
+        if 'vacancies' in update_data and current_status == 'closed':
+            # Count currently accepted applications
+            accepted_res = supabase.table('applications').select('id', count='exact').eq('job_id', job_id).eq('status', 'accepted').execute()
+            current_accepted = accepted_res.count if hasattr(accepted_res, 'count') and accepted_res.count is not None else len(accepted_res.data)
+            new_vacancies = int(update_data['vacancies'])
+            if new_vacancies > current_accepted:
+                update_data['status'] = 'open'
+                update_data['pause_reason'] = None
         
         # Re-geocode if location changed
         if 'location' in update_data:
