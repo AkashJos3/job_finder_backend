@@ -4,7 +4,7 @@ import math
 import io
 import base64
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import wraps
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -57,32 +57,6 @@ def health_check():
     """Lightweight endpoint for keep-alive pings. Prevents Render cold starts."""
     return jsonify({"status": "ok"}), 200
 
-# --- EMAIL HELPERS ---
-def get_user_email(user_id):
-    """
-    Tries to fetch the user's email from profiles, or falls back to a mock email.
-    """
-    try:
-        res = supabase.table('profiles').select('email').eq('id', user_id).execute()
-        if res.data and len(res.data) > 0 and res.data[0].get('email'):
-            return res.data[0]['email']
-    except:
-        pass
-    return "user@example.com"
-
-def send_email(to_email, subject, body):
-    """
-    Helper function to send email notifications.
-    Currently prints to console as a mock. Can be replaced with Resend/SendGrid later.
-    """
-    print(f"\n{'='*60}")
-    print(f"📧 MOCK EMAIL DISPATCH")
-    print(f"TO: {to_email}")
-    print(f"SUBJECT: {subject}")
-    print(f"BODY:\n{body}")
-    print(f"{'='*60}\n")
-    return True
-
 # --- GEOCODING & DISTANCE HELPERS ---
 
 def geocode_location(address):
@@ -116,51 +90,6 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 # --- GENERAL ---
 
 # --- JOBS API ---
-
-@app.route('/api/jobs/cleanup', methods=['POST', 'GET'])
-def cleanup_jobs():
-    """
-    Endpoint meant to be triggered by an external cron job (e.g., cron-job.org).
-    1. Close 'open' jobs whose job_date is in the past.
-    2. Expire 'pending' applications that are older than 7 days.
-    """
-    try:
-        today_date = datetime.now().strftime('%Y-%m-%d')
-        
-        # 1. Close expired jobs
-        open_jobs_res = supabase.table('jobs').select('id, job_date').eq('status', 'open').execute()
-        expired_jobs = []
-        if open_jobs_res.data:
-            for job in open_jobs_res.data:
-                if job.get('job_date') and job['job_date'] < today_date:
-                    expired_jobs.append(job['id'])
-                    
-        for jid in expired_jobs:
-            supabase.table('jobs').update({'status': 'closed'}).eq('id', jid).execute()
-
-        # 2. Expire old pending applications
-        threshold_date = (datetime.utcnow() - timedelta(days=7)).isoformat()
-        pending_apps_res = supabase.table('applications').select('id, created_at').eq('status', 'pending').execute()
-        
-        expired_apps = []
-        if pending_apps_res.data:
-            for app in pending_apps_res.data:
-                if app.get('created_at') and app['created_at'] < threshold_date:
-                    expired_apps.append(app['id'])
-
-        for aid in expired_apps:
-            supabase.table('applications').update({'status': 'rejected'}).eq('id', aid).execute()
-
-        return jsonify({
-            "message": "Cleanup successful",
-            "expired_jobs_count": len(expired_jobs),
-            "expired_applications_count": len(expired_apps)
-        }), 200
-
-    except Exception as e:
-        print(f"Cleanup error: {e}")
-        return jsonify({"error": str(e)}), 500
-
 
 @app.route('/api/jobs', methods=['GET'])
 def get_jobs():
@@ -214,44 +143,49 @@ def parse_job_poster():
         if not image_data:
             return jsonify({"error": "No image data provided"}), 400
             
-        api_key = os.environ.get("GROQ_API_KEY")
+        api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
-            return jsonify({"error": "GROQ_API_KEY not configured on server"}), 500
+            return jsonify({"error": "GEMINI_API_KEY not configured on server"}), 500
 
-        # Ensure we have a proper data URL for the image
-        if not image_data.startswith('data:'):
-            image_data = f"data:image/jpeg;base64,{image_data}"
+        # Handle data URL vs raw base64
+        if image_data.startswith('data:'):
+            mime_type = image_data.split(';')[0].split(':')[1]
+            base64_img = image_data.split(',')[1]
+        else:
+            mime_type = "image/jpeg"
+            base64_img = image_data
 
         prompt = """Extract the following information from this job poster image.
 Return ONLY a raw JSON object with these exact keys:
 - title: The job title (e.g. "Cashier", "Tutor")
-- description: A brief summary of the role and responsibilities.
-- wage: The pay or wage mentioned, just the number (e.g. "500"). If not found, use "".
-- requirements: Any shift timings or requirements mentioned (e.g. "Weekends only", "Morning shift").
+- location: The place, city, or address mentioned (e.g. "Kaliyakkavilai"). If not found, use "".
+- description: A brief summary of the role. If not clearly stated, combine other details like Age limit, Qualifications, and contact info into a readable description.
+- wage: The daily pay rate, just the number (e.g. "500"). If the poster lists a monthly income (e.g. "15000 - 20000"), divide the lower number by 30 to approximate the daily wage and return only that number. If not found, use "".
+- requirements: Any shift timings or requirements mentioned (e.g. "9.30 am - 4.30 pm").
 Do not include markdown formatting or json code blocks, just raw JSON."""
 
-        # Use Groq's free Vision API (Llama 3.2 Vision)
-        url = "https://api.groq.com/openai/v1/chat/completions"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
         headers = {
-            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-            "messages": [
+            "contents": [
                 {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
+                    "parts": [
+                        {"text": prompt},
                         {
-                            "type": "image_url",
-                            "image_url": {"url": image_data}
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": base64_img
+                            }
                         }
                     ]
                 }
             ],
-            "max_tokens": 1024,
-            "temperature": 0.1
+            "generationConfig": {
+                "temperature": 0.1,
+                "response_mime_type": "application/json"
+            }
         }
         
         resp = requests.post(url, headers=headers, json=payload, timeout=60)
@@ -259,21 +193,26 @@ Do not include markdown formatting or json code blocks, just raw JSON."""
         if resp.status_code != 200:
             err_detail = resp.text
             try:
-                err_detail = resp.json().get('error', {}).get('message', resp.text)
+                err_detail = resp.json()
             except:
                 pass
-            return jsonify({"error": f"AI Parsing Error ({resp.status_code}): {err_detail}"}), 500
+            print(f"Gemini API Error: {err_detail}")
+            return jsonify({"error": f"AI Parsing Error ({resp.status_code})"}), 500
             
         result = resp.json()
-        text = result['choices'][0]['message']['content']
-        # Clean response in case it has markdown markers
+        try:
+            text = result['candidates'][0]['content']['parts'][0]['text']
+        except (KeyError, IndexError):
+            print(f"Unexpected Gemini response format: {result}")
+            return jsonify({"error": "Unexpected response format from AI"}), 500
+            
+        # Clean response in case it has markdown markers (though response_mime_type should preclude this)
         text = text.replace('```json', '').replace('```', '').strip()
         parsed_data = json.loads(text)
         return jsonify({"data": parsed_data}), 200
     except Exception as e:
         import traceback
         traceback.print_exc()
-            
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/jobs', methods=['POST'])
@@ -785,13 +724,6 @@ def apply_job():
             student_name = student_res.data[0]['full_name'] if student_res.data else "A student"
             
             create_notification(employer_id, f"{student_name} applied for {job_title}", "application")
-            
-            employer_email = get_user_email(employer_id)
-            send_email(
-                employer_email,
-                f"New Application for {job_title}",
-                f"Hello,\n\n{student_name} has just applied for your job '{job_title}'.\n\nLog in to AfterBell to review their application.\n\nBest,\nThe AfterBell Team"
-            )
 
         return jsonify({"data": response.data[0]}), 201
     except Exception as e:
@@ -831,34 +763,6 @@ def get_student_applications():
 
         return jsonify({"data": apps}), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/applications/<application_id>/withdraw', methods=['PUT'])
-@require_auth
-def withdraw_application(application_id):
-    """Student withdraws their own pending application"""
-    try:
-        student_id = request.user.id
-
-        # Verify this application belongs to the student
-        app_res = supabase.table('applications').select('id, student_id, status').eq('id', application_id).execute()
-        if not app_res.data:
-            return jsonify({"error": "Application not found"}), 404
-
-        app = app_res.data[0]
-        if app['student_id'] != student_id:
-            return jsonify({"error": "Forbidden", "message": "You can only withdraw your own applications"}), 403
-
-        if app['status'] not in ('pending', 'Pending'):
-            return jsonify({"error": "Cannot withdraw", "message": "Only pending applications can be withdrawn"}), 400
-
-        # Delete the application
-        supabase.table('applications').delete().eq('id', application_id).execute()
-
-        return jsonify({"message": "Application withdrawn successfully"}), 200
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/auth/check-email', methods=['POST'])
@@ -1000,7 +904,7 @@ def get_employer_analytics():
             d = datetime.now() - timedelta(days=i)
             day_name = d.strftime('%a') # Mon, Tue, etc
             date_str = d.strftime('%Y-%m-%d')
-            days.append({'date': date_str, 'name': day_name, 'applications': 0})
+            days.append({'date': date_str, 'name': day_name, 'applications': 0, 'views': 0})
             
         # Count applications per day
         for app in apps:
@@ -1009,6 +913,11 @@ def get_employer_analytics():
                 if day['date'] == app_date:
                     day['applications'] += 1
                     break
+                    
+        # Simulate views (random 2.5x to 4x of applications + a small baseline)
+        for day in days:
+            base_views = random.randint(15, 60)
+            day['views'] = int(day['applications'] * random.uniform(2.5, 4.0)) + base_views
             
         return jsonify({"data": days}), 200
     except Exception as e:
@@ -1044,13 +953,6 @@ def update_application_status():
         student_id = app_res.data[0]['student_id']
         job_title = app_res.data[0]['jobs'].get('title', 'a job')
         create_notification(student_id, f"Your application for {job_title} was {new_status}", "status_update")
-        
-        student_email = get_user_email(student_id)
-        send_email(
-            student_email,
-            f"Application Update: {job_title}",
-            f"Hello,\n\nYour application for '{job_title}' was just {new_status} by the employer.\n\nLog in to AfterBell to view more details.\n\nBest,\nThe AfterBell Team"
-        )
         
         return jsonify({"data": update_res.data[0], "message": f"Application {new_status} successfully"}), 200
     except Exception as e:
@@ -1130,13 +1032,6 @@ def schedule_interview(application_id):
             f"📅 Interview scheduled for {job_title} on {formatted_date} at {interview_time}. Check your Schedule to accept!",
             "interview"
         )
-        
-        student_email = get_user_email(student_id)
-        send_email(
-            student_email,
-            f"Interview Request: {job_title}",
-            f"Hello,\n\nYou have been invited to an interview for '{job_title}' on {formatted_date} at {interview_time}.\n\nLog in to AfterBell to accept or decline the interview request on your schedule.\n\nBest,\nThe AfterBell Team"
-        )
 
         # Send a special interview message in chat
         interview_details = {
@@ -1180,7 +1075,7 @@ def accept_interview(application_id):
             return jsonify({"error": "Application not found"}), 404
         if app_res.data[0]['student_id'] != student_id:
             return jsonify({"error": "Forbidden"}), 403
-        if app_res.data[0]['status'] not in ('interview', 'pending', 'Pending'):
+        if app_res.data[0]['status'] != 'interview':
             return jsonify({"error": "No pending interview to accept"}), 400
 
         job_data = app_res.data[0]['jobs']
@@ -1188,17 +1083,13 @@ def accept_interview(application_id):
         job_title = job_data.get('title', 'Interview')
         job_id = job_data.get('id')
 
-        # Find and confirm the Pending shift for this interview
-        pending_shifts = supabase.table('shifts').select('*').eq('student_id', student_id).eq('job_id', job_id).eq('status', 'Pending').order('created_at', desc=True).limit(1).execute()
-        
-        if not pending_shifts.data:
-            return jsonify({"error": "No pending interview to accept"}), 400
-
         # Update application status to accepted
         supabase.table('applications').update({'status': 'accepted'}).eq('id', application_id).execute()
 
-        # Confirm the shift
-        supabase.table('shifts').update({'status': 'Confirmed'}).eq('id', pending_shifts.data[0]['id']).execute()
+        # Find and confirm the Pending shift for this interview
+        pending_shifts = supabase.table('shifts').select('*').eq('student_id', student_id).eq('job_id', job_id).eq('status', 'Pending').order('created_at', desc=True).limit(1).execute()
+        if pending_shifts.data:
+            supabase.table('shifts').update({'status': 'Confirmed'}).eq('id', pending_shifts.data[0]['id']).execute()
 
         # Notify the employer
         student_res = supabase.table('profiles').select('full_name').eq('id', student_id).execute()
@@ -1210,54 +1101,6 @@ def accept_interview(application_id):
         )
 
         return jsonify({"message": "Interview accepted! It has been added to your schedule."}), 200
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/applications/<application_id>/decline_interview', methods=['PUT'])
-@require_auth
-def decline_interview(application_id):
-    """Student declines an interview — rejects the application and removes the pending shift"""
-    try:
-        student_id = request.user.id
-
-        # Verify the application belongs to this student
-        app_res = supabase.table('applications').select('*, jobs!inner(employer_id, title, id)').eq('id', application_id).execute()
-        if not app_res.data:
-            return jsonify({"error": "Application not found"}), 404
-        if app_res.data[0]['student_id'] != student_id:
-            return jsonify({"error": "Forbidden"}), 403
-        if app_res.data[0]['status'] not in ('interview', 'pending', 'Pending'):
-            return jsonify({"error": "No pending interview to decline"}), 400
-
-        job_data = app_res.data[0]['jobs']
-        job_id = job_data.get('id')
-        employer_id = job_data['employer_id']
-        job_title = job_data.get('title', 'Interview')
-
-        # Find the Pending shift for this interview
-        pending_shifts = supabase.table('shifts').select('*').eq('student_id', student_id).eq('job_id', job_id).eq('status', 'Pending').order('created_at', desc=True).limit(1).execute()
-        
-        if not pending_shifts.data:
-            return jsonify({"error": "No pending interview to decline"}), 400
-
-        # Update application status to rejected
-        supabase.table('applications').update({'status': 'rejected', 'notes': 'Student declined interview'}).eq('id', application_id).execute()
-
-        # Delete the proposed shift from calendar
-        supabase.table('shifts').delete().eq('id', pending_shifts.data[0]['id']).execute()
-
-        # Notify the employer
-        student_res = supabase.table('profiles').select('full_name').eq('id', student_id).execute()
-        student_name = student_res.data[0]['full_name'] if student_res.data else "A student"
-        create_notification(
-            employer_id,
-            f"❌ {student_name} declined the interview for {job_title}.",
-            "interview"
-        )
-
-        return jsonify({"message": "Interview declined successfully."}), 200
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1329,7 +1172,6 @@ def submit_report():
             "reported_id": reported_id,
             "job_id": job_id,
             "reason": reason,
-            "severity": data.get('severity', 'medium'),
             "status": "pending"
         }
         res = supabase.table('reports').insert(report_data).execute()
@@ -1753,12 +1595,9 @@ def submit_verification():
         business_name = data.get("business_name")
         registration_number = data.get("registration_number")
         document_url = data.get("document_url")
-        # Check if verification already exists to get previous attempts and status
-        existing = supabase.table('employer_verifications').select('id, status, ai_analysis').eq('employer_id', employer_id).execute()
+        # Check if verification already exists to get previous attempts
+        existing = supabase.table('employer_verifications').select('id, ai_analysis').eq('employer_id', employer_id).execute()
         
-        if existing.data and existing.data[0].get('status') == 'rejected':
-            return jsonify({"error": "Verification Rejected", "message": "Your verification request was rejected by our compliance team. You cannot submit again."}), 403
-
         attempts = 1
         if existing.data and existing.data[0].get('ai_analysis'):
             try:
