@@ -142,10 +142,6 @@ def parse_job_poster():
         image_data = data.get('image')
         if not image_data:
             return jsonify({"error": "No image data provided"}), 400
-            
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            return jsonify({"error": "GEMINI_API_KEY not configured on server"}), 500
 
         # Handle data URL vs raw base64
         if image_data.startswith('data:'):
@@ -164,10 +160,55 @@ Return ONLY a raw JSON object with these exact keys:
 - requirements: Any shift timings or requirements mentioned (e.g. "9.30 am - 4.30 pm").
 Do not include markdown formatting or json code blocks, just raw JSON."""
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-        headers = {
-            "Content-Type": "application/json"
-        }
+        # --- Try Groq API first (free, fast, generous limits) ---
+        groq_key = os.environ.get("GROQ_API_KEY")
+        if groq_key:
+            print("Using Groq API for image parsing...")
+            groq_url = "https://api.groq.com/openai/v1/chat/completions"
+            groq_headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {groq_key}"
+            }
+            groq_payload = {
+                "model": "llama-3.2-90b-vision-preview",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{base64_img}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "temperature": 0.1,
+                "max_tokens": 1024
+            }
+
+            resp = requests.post(groq_url, headers=groq_headers, json=groq_payload, timeout=60)
+
+            if resp.status_code == 200:
+                result = resp.json()
+                text = result['choices'][0]['message']['content']
+                text = text.replace('```json', '').replace('```', '').strip()
+                parsed_data = json.loads(text)
+                return jsonify({"data": parsed_data}), 200
+            else:
+                print(f"Groq API failed ({resp.status_code}): {resp.text}")
+                # Fall through to Gemini
+
+        # --- Fallback: Gemini API ---
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        if not gemini_key:
+            return jsonify({"error": "No AI API key configured on server"}), 500
+
+        print("Using Gemini API for image parsing...")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}"
+        headers = {"Content-Type": "application/json"}
         payload = {
             "contents": [
                 {
@@ -187,9 +228,9 @@ Do not include markdown formatting or json code blocks, just raw JSON."""
                 "response_mime_type": "application/json"
             }
         }
-        
+
         resp = requests.post(url, headers=headers, json=payload, timeout=60)
-        
+
         if resp.status_code != 200:
             err_detail = resp.text
             try:
@@ -198,15 +239,14 @@ Do not include markdown formatting or json code blocks, just raw JSON."""
                 pass
             print(f"Gemini API Error: {err_detail}")
             return jsonify({"error": f"AI Parsing Error ({resp.status_code})"}), 500
-            
+
         result = resp.json()
         try:
             text = result['candidates'][0]['content']['parts'][0]['text']
         except (KeyError, IndexError):
             print(f"Unexpected Gemini response format: {result}")
             return jsonify({"error": "Unexpected response format from AI"}), 500
-            
-        # Clean response in case it has markdown markers (though response_mime_type should preclude this)
+
         text = text.replace('```json', '').replace('```', '').strip()
         parsed_data = json.loads(text)
         return jsonify({"data": parsed_data}), 200
