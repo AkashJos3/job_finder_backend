@@ -164,7 +164,7 @@ Return ONLY a raw JSON object with these exact keys:
 - requirements: Any shift timings or requirements mentioned (e.g. "9.30 am - 4.30 pm").
 Do not include markdown formatting or json code blocks, just raw JSON."""
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
         headers = {
             "Content-Type": "application/json"
         }
