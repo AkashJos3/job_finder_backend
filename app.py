@@ -310,8 +310,12 @@ def update_job(job_id):
         if not job_res.data or job_res.data[0]['employer_id'] != user_id:
             return jsonify({"error": "Unauthorized"}), 403
             
-        allowed_fields = ['title', 'description', 'location', 'wage', 'requirements', 'urgent', 'status', 'image_url', 'vacancies']
+        allowed_fields = ['title', 'description', 'location', 'wage', 'requirements', 'urgent', 'status', 'image_url', 'vacancies', 'pause_reason']
         update_data = {k: v for k, v in data.items() if k in allowed_fields}
+        
+        # Auto-clear pause_reason when re-opening a job
+        if update_data.get('status') == 'open':
+            update_data['pause_reason'] = None
         
         # Re-geocode if location changed
         if 'location' in update_data:
@@ -1006,7 +1010,7 @@ def update_application_status():
         if new_status == 'accepted':
             if current_accepted + 1 >= vacancies:
                 # Auto close the job to prevent more applicants!
-                supabase.table('jobs').update({'status': 'closed'}).eq('id', job_id).execute()
+                supabase.table('jobs').update({'status': 'closed', 'pause_reason': 'All vacancies for this role have been filled.'}).eq('id', job_id).execute()
                 job_closed = True
         
         student_id = app_res.data[0]['student_id']
