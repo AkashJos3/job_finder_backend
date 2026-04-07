@@ -4,6 +4,7 @@ import math
 import io
 import base64
 import json
+import time
 from datetime import datetime
 from functools import wraps
 from flask import Flask, jsonify, request
@@ -26,6 +27,24 @@ ALLOWED_ORIGINS = [
 ]
 ALLOWED_ORIGINS = [o for o in ALLOWED_ORIGINS if o]
 CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}})
+
+# In-memory rate limiter for sensitive endpoints (IP -> list of timestamps)
+_rate_limit_store: dict[str, list[float]] = {}
+RATE_LIMIT_MAX = 5       # max requests
+RATE_LIMIT_WINDOW = 60   # per 60 seconds
+
+def _is_rate_limited(ip: str) -> bool:
+    """Return True if the IP has exceeded RATE_LIMIT_MAX requests in the last RATE_LIMIT_WINDOW seconds."""
+    now = time.time()
+    timestamps = _rate_limit_store.get(ip, [])
+    # Prune old entries
+    timestamps = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
+    if len(timestamps) >= RATE_LIMIT_MAX:
+        _rate_limit_store[ip] = timestamps
+        return True
+    timestamps.append(now)
+    _rate_limit_store[ip] = timestamps
+    return False
 
 # Initialize Supabase client
 url: str = os.environ.get("SUPABASE_URL")
@@ -815,6 +834,44 @@ def apply_job():
             create_notification(employer_id, f"{student_name} applied for {job_title}", "application")
 
         return jsonify({"data": response.data[0]}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/auth/check-email', methods=['POST'])
+def check_email_exists():
+    """Rate-limited check whether an email is registered (for OTP login UX)."""
+    # --- Rate limit by IP ---
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr) or 'unknown'
+    if _is_rate_limited(client_ip):
+        return jsonify({"error": "Too many requests. Please try again later."}), 429
+
+    try:
+        data = request.json
+        email = (data.get('email') or '').strip().lower()
+        if not email:
+            return jsonify({"error": "Email is required"}), 400
+
+        service_role_key = os.getenv('SUPABASE_KEY')
+        supabase_url = os.getenv('SUPABASE_URL')
+
+        headers = {
+            'apikey': service_role_key,
+            'Authorization': f'Bearer {service_role_key}'
+        }
+
+        # Query Supabase Admin API for specific email
+        users_res = requests.get(
+            f'{supabase_url}/auth/v1/admin/users',
+            headers=headers,
+            params={'page': 1, 'per_page': 1000}
+        )
+        if users_res.status_code == 200:
+            for u in users_res.json().get('users', []):
+                if (u.get('email') or '').lower() == email:
+                    return jsonify({"exists": True}), 200
+
+        return jsonify({"exists": False}), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
