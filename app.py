@@ -5,6 +5,7 @@ import io
 import base64
 import json
 import time
+import re
 from datetime import datetime
 from functools import wraps
 from flask import Flask, jsonify, request
@@ -45,6 +46,65 @@ def _is_rate_limited(ip: str) -> bool:
     timestamps.append(now)
     _rate_limit_store[ip] = timestamps
     return False
+
+# ── Email Validation ──
+DISPOSABLE_DOMAINS = {
+    'mailinator.com', 'tempmail.com', 'guerrillamail.com', 'throwaway.email',
+    'yopmail.com', 'sharklasers.com', 'guerrillamailblock.com', 'grr.la',
+    'dispostable.com', 'trashmail.com', 'fakeinbox.com', 'tempail.com',
+    'temp-mail.org', 'minutemail.com', 'maildrop.cc', 'mailnesia.com',
+    'jetable.org', 'mohmal.com', 'getnada.com', 'emailondeck.com',
+}
+
+def validate_email(raw_email: str) -> tuple[bool, str]:
+    """Validate email format. Returns (is_valid, error_message)."""
+    email = raw_email.strip()
+    if not email:
+        return False, "Email address is required."
+    if len(email) > 254:
+        return False, "Email address is too long (max 254 characters)."
+
+    # Exactly one @
+    if email.count('@') != 1:
+        return False, "Email must contain exactly one '@' symbol."
+
+    local_part, domain_part = email.split('@')
+    domain_part = domain_part.lower()
+
+    if not local_part:
+        return False, "Email is missing the username before '@'."
+    if not domain_part:
+        return False, "Email is missing the domain after '@'."
+    if len(local_part) > 64:
+        return False, "The username part is too long (max 64 characters)."
+
+    # Local part: allowed chars, no consecutive/leading/trailing dots
+    if not re.match(r'^[a-zA-Z0-9._%+\-]+$', local_part):
+        return False, "Email username contains invalid characters."
+    if local_part.startswith('.') or local_part.endswith('.'):
+        return False, "Email username cannot start or end with a dot."
+    if '..' in local_part:
+        return False, "Email username cannot contain consecutive dots."
+
+    # Domain: at least one dot, valid labels
+    if '.' not in domain_part:
+        return False, "Email domain must contain at least one dot."
+    labels = domain_part.split('.')
+    if len(labels[-1]) < 2:
+        return False, "Email has an invalid top-level domain."
+    for label in labels:
+        if not label:
+            return False, "Email domain contains empty labels."
+        if not re.match(r'^[a-zA-Z0-9\-]+$', label):
+            return False, "Email domain contains invalid characters."
+        if label.startswith('-') or label.endswith('-'):
+            return False, "Email domain labels cannot start or end with a hyphen."
+
+    # Disposable domain check
+    if domain_part in DISPOSABLE_DOMAINS:
+        return False, "Temporary/disposable email addresses are not allowed."
+
+    return True, ""
 
 # Initialize Supabase client
 url: str = os.environ.get("SUPABASE_URL")
@@ -861,9 +921,16 @@ def check_email_exists():
 
     try:
         data = request.json
-        email = (data.get('email') or '').strip().lower()
+        email = (data.get('email') or '').strip()
         if not email:
             return jsonify({"error": "Email is required"}), 400
+
+        # Validate email format before hitting Supabase
+        is_valid, validation_error = validate_email(email)
+        if not is_valid:
+            return jsonify({"error": validation_error}), 400
+
+        email = email.strip().lower()
 
         service_role_key = os.getenv('SUPABASE_KEY')
         supabase_url = os.getenv('SUPABASE_URL')
