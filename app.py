@@ -17,8 +17,15 @@ import PIL.Image
 load_dotenv()
 
 app = Flask(__name__)
-# Enable CORS for the React frontend
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+# Enable CORS for the React frontend and restrict to allowed origins
+ALLOWED_ORIGINS = [
+    os.environ.get("FRONTEND_URL", "https://job-finder-frontend-lake.vercel.app"),
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+]
+ALLOWED_ORIGINS = [o for o in ALLOWED_ORIGINS if o]
+CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}})
 
 # Initialize Supabase client
 url: str = os.environ.get("SUPABASE_URL")
@@ -635,6 +642,14 @@ def update_shift_status(shift_id):
     """Update a shift's status or fields"""
     try:
         user_id = request.user.id
+        # Verify ownership / access
+        shift_res = supabase.table('shifts').select('employer_id, student_id').eq('id', shift_id).execute()
+        if not shift_res.data:
+            return jsonify({'error': 'Shift not found'}), 404
+        shift = shift_res.data[0]
+        if user_id != shift.get('employer_id') and user_id != shift.get('student_id'):
+            return jsonify({'error': 'Forbidden - you do not have access to this shift'}), 403
+
         data = request.json
         allowed = {k: v for k, v in data.items() if k in ('status', 'notes', 'student_id', 'start_time', 'end_time', 'shift_date')}
         if not allowed:
@@ -651,6 +666,14 @@ def update_shift_status(shift_id):
 def delete_shift(shift_id):
     """Delete a shift"""
     try:
+        user_id = request.user.id
+        # Verify ownership
+        shift_res = supabase.table('shifts').select('employer_id').eq('id', shift_id).execute()
+        if not shift_res.data:
+            return jsonify({'error': 'Shift not found'}), 404
+        if user_id != shift_res.data[0].get('employer_id'):
+            return jsonify({'error': 'Forbidden - only the shift creator can delete it'}), 403
+
         supabase.table('shifts').delete().eq('id', shift_id).execute()
         return jsonify({'message': 'Shift deleted'}), 200
     except Exception as e:
@@ -760,6 +783,16 @@ def apply_job():
         if not profile_res.data or profile_res.data[0]['role'] != 'student':
             return jsonify({"error": "Forbidden", "message": "Only students can apply"}), 403
             
+        # Verify job is still open
+        job_check = supabase.table('jobs').select('status').eq('id', job_id).execute()
+        if not job_check.data or job_check.data[0]['status'] != 'open':
+            return jsonify({"error": "Forbidden", "message": "This job is no longer accepting applications"}), 400
+
+        # Verify no duplicate application
+        existing = supabase.table('applications').select('id').eq('job_id', job_id).eq('student_id', student_id).execute()
+        if existing.data:
+            return jsonify({"error": "Conflict", "message": "You have already applied to this job"}), 409
+            
         app_data = {
             "job_id": job_id,
             "student_id": student_id,
@@ -820,39 +853,6 @@ def get_student_applications():
         return jsonify({"data": apps}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-@app.route('/api/auth/check-email', methods=['POST'])
-def check_email_exists():
-    """Validates if an email is registered in the system to prevent OTP bypass signup"""
-    try:
-        data = request.json
-        email = data.get('email', '').lower()
-        if not email:
-            return jsonify({"error": "Email is required"}), 400
-            
-        service_role_key = os.getenv('SUPABASE_KEY')
-        supabase_url = os.getenv('SUPABASE_URL')
-        
-        headers = {
-            'apikey': service_role_key,
-            'Authorization': f'Bearer {service_role_key}'
-        }
-        
-        # We can fetch all users or use the admin rest endpoint.
-        # But for scaling, better to check the profiles table if they have a role populated.
-        # Wait, the easiest way to check if an account is strictly valid is grabbing the profiles table.
-        # However, profiles table doesn't have email. So we fetch users from auth backend.
-        users_res = requests.get(f'{supabase_url}/auth/v1/admin/users', headers=headers)
-        if users_res.status_code == 200:
-            for u in users_res.json().get('users', []):
-                if u.get('email', '').lower() == email:
-                    return jsonify({"exists": True}), 200
-                    
-        return jsonify({"exists": False}), 200
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 
 @app.route('/api/applications/employer', methods=['GET'])
 @require_auth
