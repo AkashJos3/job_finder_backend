@@ -1698,7 +1698,7 @@ Do not include markdown formatting or json code blocks, just raw JSON."""
         confidence = ai_report.get("confidence", 0)
         red_flags = ai_report.get("red_flags", [])
         if confidence >= 85 and len(red_flags) == 0:
-            ai_report["recommendation"] = "auto_approve"
+            ai_report["recommendation"] = "high_confidence"
         elif confidence >= 50:
             ai_report["recommendation"] = "manual_review"
         else:
@@ -1754,10 +1754,8 @@ def submit_verification():
         # Add tracking data to AI report
         ai_report["submission_attempts"] = attempts
         
-        # Determine initial status based on AI confidence
+        # AI provides score only - admin makes final call
         status = "pending"
-        if ai_report.get("recommendation") == "auto_approve":
-            status = "approved"
         
         verif_data = {
             "employer_id": employer_id,
@@ -1774,10 +1772,6 @@ def submit_verification():
         else:
             # Insert a new record
             response = supabase.table('employer_verifications').insert(verif_data).execute()
-        
-        # If auto-approved, also update the employer profile
-        if status == "approved":
-            supabase.table('profiles').update({'is_verified': True}).eq('id', employer_id).execute()
             
         return jsonify({
             "data": response.data[0] if response.data else {}, 
