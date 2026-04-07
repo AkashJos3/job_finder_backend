@@ -78,8 +78,12 @@ def validate_email(raw_email: str) -> tuple[bool, str]:
     if len(local_part) > 64:
         return False, "The username part is too long (max 64 characters)."
 
+    # Reject uppercase letters
+    if any(c.isupper() for c in local_part):
+        return False, "Email must be in lowercase only. Capital letters are not allowed."
+
     # Local part: allowed chars, no consecutive/leading/trailing dots
-    if not re.match(r'^[a-zA-Z0-9._%+\-]+$', local_part):
+    if not re.match(r'^[a-z0-9._%+\-]+$', local_part):
         return False, "Email username contains invalid characters."
     if local_part.startswith('.') or local_part.endswith('.'):
         return False, "Email username cannot start or end with a dot."
