@@ -95,8 +95,8 @@ def validate_email(raw_email: str) -> tuple[bool, str]:
     for label in labels:
         if not label:
             return False, "Email domain contains empty labels."
-        if not re.match(r'^[a-zA-Z0-9\-]+$', label):
-            return False, "Email domain contains invalid characters."
+        if not re.match(r'^[a-zA-Z\-]+$', label):
+            return False, "Email domain cannot contain numbers or special characters."
         if label.startswith('-') or label.endswith('-'):
             return False, "Email domain labels cannot start or end with a hyphen."
 
