@@ -713,9 +713,12 @@ def create_review():
         
         if not student_id or not rating:
             return jsonify({"error": "Missing student_id or rating"}), 400
+        
+        # Check if this employer already reviewed this student
+        existing = supabase.table('reviews').select('id').eq('employer_id', employer_id).eq('student_id', student_id).execute()
+        if existing.data:
+            return jsonify({"error": "You have already rated this student"}), 409
             
-        # Optional: verify they actually had a completed shift together
-        # For MVP, we just insert the review
         review_data = {
             "employer_id": employer_id,
             "student_id": student_id,
@@ -743,6 +746,17 @@ def get_student_reviews(student_id):
             average_rating = round(total / len(reviews), 1)
             
         return jsonify({"data": reviews, "average": average_rating, "count": len(reviews)}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/reviews/by-employer', methods=['GET'])
+@require_auth
+def get_reviews_by_employer():
+    """Return all reviews this employer has submitted (used to track who's already been rated)"""
+    try:
+        employer_id = request.user.id
+        res = supabase.table('reviews').select('id, student_id').eq('employer_id', employer_id).execute()
+        return jsonify({"data": res.data}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
